@@ -1,0 +1,345 @@
+// Ranger Finder
+//  
+
+#include <p18cxxx.h>
+
+#include <stdio.h>
+#include <string.h>
+#pragma config WDT = OFF
+
+/************** used for LCD code **************/
+#define	RS PORTBbits.RB4
+#define	EN PORTBbits.RB7
+
+void pulseGenerate(void);
+void calculateDistance2TargetPosition(unsigned char );    
+void barvisualdisplay(void);
+void targetoutofrange_ISR(void);
+ void targetfound_ISR(void);
+
+/************** used for LCD code **************/
+void LCDCOM(unsigned char);  // send command to LCD
+void LCDDATA(unsigned char); // send character to LCD
+void initializeLCD(void);  //initialize LCD
+void integer2LCDdisplay(unsigned int);
+void INT2ASCII(unsigned char* ,unsigned int );
+unsigned char digits[4];
+void Delay40micro(void); 
+void delaynmsec(unsigned int);
+ void targetfound_ISR(void);
+void targetoutofrange_ISR(void);
+
+//unsigned int distance2target;
+unsigned int timesoundtravelroundtrip;
+unsigned int distance2target;
+unsigned int Speedofsound=340;
+unsigned clockfrequency; //in KHz
+unsigned char numberofmeasurements;
+unsigned char targetfound;
+unsigned char numberofcycle_pulse;
+unsigned char numberofpulses_burst;
+
+
+#pragma interrupt chk_isr
+void chk_isr (void)
+{
+  if ((PIR2bits.CMIF==1) ) targetfound_ISR();  
+  if (INTCONbits.TMR0IF==1) targetoutofrange_ISR();
+/*******/ LCDCOM( (0x80|0x40) );  
+/*******/ integer2LCDdisplay(targetfound<<8 | CMCON);
+/*******/ integer2LCDdisplay(CVRCON);
+/*******/integer2LCDdisplay((TMR0H)); 
+/*******/integer2LCDdisplay((TMR0L));
+  CMCON;
+}
+
+
+#pragma code My_HiPrio_Int=0x08 //High-priority interrupt 
+void My_HiRrio_Int (void)
+  {
+  _asm
+     GOTO chk_isr
+  _endasm
+  }
+#pragma code   //end of code
+
+void main (void)
+{     
+   unsigned int clockfrequency; //in KHz
+   unsigned int pulseDuration,i;
+   unsigned int waitForSoundGoWay;
+   unsigned int TimeforSoundGonefar;
+
+   unsigned char * ptr;
+   unsigned char numberofmeasurements=0;
+   unsigned char message1[]="Target out of range";
+   unsigned char message2[]="The dist. to target:";
+
+/**/unsigned char temp0, temp1;// temp2, temp3; 
+   unsigned int temp,temp2;
+
+    INTCONbits.TMR0IF=0;
+    INTCONbits.TMR0IE=1;
+ 
+    PIR2bits.CMIF=0;   //voltage is tiggered to 0.26V
+
+    INTCONbits.PEIE=1;
+    INTCONbits.GIE=1; 
+
+   ptr=digits;
+
+   TRISB=0;
+   CCP1CON=0x2C; //CCP1 pin (output to Transmitter)
+   T2CON=0;   
+   T0CON=0;
+
+   CMCON=0x11;  //CMCON=0x1E;
+   CVRCON=0xA1; 
+   TRISDbits.TRISD0=1;
+   TRISDbits.TRISD1=1;
+   TRISCbits.TRISC2=0;
+
+   clockfrequency=1171; //in KHz Period=0.83333 microseconds
+   numberofcycle_pulse=clockfrequency/40;
+   pulseDuration=numberofcycle_pulse*5;//*25*1.2;  //in number of clock cycles:clockfrequency)/1000
+   numberofpulses_burst=5;
+   pulseDuration=numberofpulses_burst*pulseDuration;//5*25*1.2;  //in number of clock cycles:clockfrequency)/1000
+   pulseDuration=150;//5*25*1.2;  //in number of clock cycles:clockfrequency)/1000
+   waitForSoundGoWay=pulseDuration*5;
+   waitForSoundGoWay=1170;
+   TimeforSoundGonefar=7000; 
+
+   TimeforSoundGonefar=65536-TimeforSoundGonefar;
+   waitForSoundGoWay=TimeforSoundGonefar+1170;
+
+
+   initializeLCD();
+   PIE2bits.CMIE=0;
+   do
+   {  
+	  numberofmeasurements=0;
+	  timesoundtravelroundtrip=0;
+      do
+      {    
+          //LCDCOM(0x01);  //clear LCD
+          TMR0H=TimeforSoundGonefar>>8;
+          TMR0L=(0x00ff & TimeforSoundGonefar); 
+
+          targetfound=0;
+          T0CONbits.TMR0ON=1;
+          PIR2bits.CMIF==0; 
+
+          pulseGenerate(); 
+          
+          while( (TMR0H<<8  | TMR0L) < waitForSoundGoWay );
+
+          PIE2bits.CMIE=1;
+          CMCON;
+          while(targetfound==0); 
+
+          TMR0L; CMCON; 
+          temp=(TMR0H<<8  | TMR0L);
+          if(targetfound==1 & (temp > waitForSoundGoWay) ) 
+             timesoundtravelroundtrip+= temp-TimeforSoundGonefar; 
+
+///*******/ LCDCOM( (0x80|0x40) );  /*First line: go to space loc. n(>=0): 0x80|n */
+//*******/integer2LCDdisplay(timesoundtravelroundtrip);
+//*******/integer2LCDdisplay(TMR0H); integer2LCDdisplay(TMR0L);
+          
+          numberofmeasurements++;   
+      }while(targetfound==1 & numberofmeasurements<1);
+
+///*******/ temp=CMCON; integer2LCDdisplay(temp);  
+/*******/integer2LCDdisplay(timesoundtravelroundtrip); //LCDDATA('*');
+
+       if (targetfound==1) 
+       {
+          calculateDistance2TargetPosition(numberofmeasurements);
+          LCDCOM( (0x80|0x00) );  /*First line: go to space loc. n(>=0): 0x80|n */
+          for(i=0 ; i<5; i++) LCDDATA(message2[i]); //strlen(message2)
+
+  //        LCDCOM((0x80|0x45));  /*Second line: go to space loc. n(>=0x39): 0x80|n */
+          integer2LCDdisplay(distance2target);
+          LCDDATA(' ');	 LCDDATA('m'); LCDDATA('m');
+
+          barvisualdisplay(); 
+       }
+       else 
+       {
+          LCDCOM( (0x80|0x00) );  /*First line: go to space loc. n(>=0): 0x80|n */
+          for(i=0 ; i<strlen(message1); i++) 
+          {
+                LCDDATA(message1[i]); 
+          }
+       } 
+
+       delaynmsec(10);
+    }while(1);
+ 
+
+}
+
+
+void barvisualdisplay(void)
+{
+          if(distance2target<0x0007) PORTD=0x06; //few bit will be sent to PORTD to drive the LEDs
+          else if(distance2target<0x0007) PORTD=0xFC;
+          else if(distance2target<0x0037) PORTD=0x7C;
+          else if(distance2target<0x00F7) PORTD=0x2C;
+          else if(distance2target<0x03F7) PORTD=0x1C;
+          else if(distance2target<0x0FF7) PORTD=0x07;
+          else if(distance2target<0x3FF7) PORTD=0x04;
+}
+
+void pulseGenerate(void)
+{
+
+   unsigned char i;
+
+   TRISCbits.TRISC2=0;
+   PR2=29;
+   // T2CON=0;
+
+   CCP1CON=0x2C;
+   CCPR1L=14;
+ 
+   TMR2=0;
+
+   T0CONbits.TMR0ON=1;
+   T2CONbits.TMR2ON=1;
+   TRISCbits.TRISC2=0;
+   for(i = 0; i < 2 ; i++)
+   {
+	  PIR1bits.TMR2IF = 0;
+      while(PIR1bits.TMR2IF == 0);
+   }
+   //while((TMR0H<<8  | TMR0L)< x) ;
+   _asm NOP _endasm;
+   while(PORTCbits.RC2==1) 
+   _asm NOP _endasm;//_asm NOP _endasm;_asm NOP _endasm;_asm NOP _endasm;//for(i = 0; i < 4 ; i++) _asm NOP _endasm; //for(i = 0; i < 2 ; i++) ;    
+  TRISCbits.TRISC2=1; 
+
+  // CCP1CON=0x0C;      
+   //  CCPR1L=0; //
+}
+
+
+void calculateDistance2TargetPosition(unsigned char numberofmeasurements)
+{ //Calculate the distance and display it on the LCD
+    //timesoundtravelroundtrip = (TMR0H<<8 | TMR0L); 
+///*******/timesoundtravelroundtrip=2340;
+
+    //timesoundtravelroundtrip = 2000; 
+    distance2target=(290*(timesoundtravelroundtrip/100))/10;     //printf("distance2target=%d",distance2target);
+   
+    if (numberofmeasurements==1)
+                 distance2target>>=1;
+    if (numberofmeasurements==2)
+                 distance2target>>=2; 
+    if (numberofmeasurements==4)
+                 distance2target>>=3;    
+///*******/printf("\n %d  %d  %d",numberofmeasurements,timesoundtravelroundtrip,distance2target);
+    //printf("distance2target=%d",distance2target);
+}
+
+
+void initializeLCD( void)
+{
+	//Initialization of the LCD: configuration 
+    LCDCOM(0x28);  //init LCD for 2 lines & 5x7 matrix
+	LCDCOM(0x0e);  //send command for LCD on, cursor on
+	LCDCOM(0x01);  //clear LCD
+    LCDCOM(0x06);  //shift cursor right
+} 
+
+void LCDCOM(unsigned char x)
+{
+	// Write a command to LCD 
+    PORTB=(x>>4)&0x0f;
+	RS=0;
+	EN=1;
+	EN=0;     //EN=0 for H-to-L pulse
+	PORTB=x&0x0f;
+	RS=0;
+	EN=1;     
+	EN=0;     //EN=0 for H-to-L pulse
+	delaynmsec(1);
+}
+
+void LCDDATA(unsigned char x)
+{
+	// Write a data (character) to LCD 
+    PORTB=(x>>4)&0x0f;
+	RS=1;
+	EN=1;
+	EN=0;     //EN=0 for H-to-L pulse
+	PORTB=x&0x0f;
+	RS=1;
+	EN=1;
+	EN=0;     //EN=0 for H-to-L pulse
+	Delay40micro();
+}
+
+void Delay40micro(void)
+{
+   unsigned char j;
+   for (j=0; j<20; j++) { _asm  NOP   _endasm}
+}
+
+void delaynmsec(unsigned int numberofmsec)
+{
+   unsigned char j,k;
+   for (k=0;k<numberofmsec-1;k++) 
+       for (j=1; j<60; j++)     Delay40micro(); 
+}
+
+void integer2LCDdisplay(unsigned int z)
+{   /* Display integer on LCD */
+    unsigned char i;
+    unsigned char* ptr=digits;
+    INT2ASCII(ptr, z); //convert integer to ASCII characters
+           
+    /**********   Display to LCD **********/
+    //LCDCOM((0x80|0x03));  //First line: go to space loc. n(>=0): 0x80|n
+    for(i=3; i<strlen(digits); i--)
+    {   
+	    LCDDATA(digits[i]); 
+    } 
+}
+
+
+void INT2ASCII(unsigned char* ptr,unsigned int z) 
+{
+      unsigned char i;        
+      for (i=0; i<4;i++) 
+      {                             
+           *(ptr+i)=z%10+'0';       
+            z/=10;      
+      }
+      for (i=0; i<0; i++) digits[i]=*(ptr+i);   
+}
+
+ 
+ void targetfound_ISR(void)
+{ 
+     if(CMCONbits.C1OUT==1)
+    {
+       T0CONbits.TMR0ON=0; 
+       targetfound=1; 
+       PIE2bits.CMIE=0;
+    }
+
+     PIR2bits.CMIF==0; 
+}
+      
+
+void targetoutofrange_ISR(void)
+{
+    T0CONbits.TMR0ON=0; 
+    INTCONbits.TMR0IF=0;  
+    PIE2bits.CMIE=0;
+    targetfound=2;
+    PIR2bits.CMIF==0; 
+}
+
+
